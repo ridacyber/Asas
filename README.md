@@ -4,7 +4,6 @@ Asas means "foundation" — a small programming language built from scratch, wit
 
 Live demo: asas-navy.vercel.app
 
-Show Image
 
 What is this?
 
