@@ -3,8 +3,9 @@ import React, { useState, useRef } from "react";
 // ============================================================
 // ASAS — a tiny language interpreter (lexer -> parser -> evaluator)
 // V1 scope: numbers, arithmetic (+ - * /), variables (let), print()
-// V2: structured errors with line numbers + hints, and "insight"
-// messages for successful-but-non-obvious runs.
+// V2: structured errors with line numbers + hints, "insight" messages
+// for successful-but-non-obvious runs, plus new language features:
+// strings, comments (#), booleans, comparisons, and/or/not, if/else.
 // ============================================================
 
 // ---------- ERRORS ----------
@@ -48,16 +49,32 @@ function closestName(target, candidates) {
 // ---------- LEXER ----------
 const TokenType = {
   NUMBER: "NUMBER",
+  STRING: "STRING",
   IDENT: "IDENT",
   LET: "LET",
   PRINT: "PRINT",
+  IF: "IF",
+  ELSE: "ELSE",
+  TRUE: "TRUE",
+  FALSE: "FALSE",
+  AND: "AND",
+  OR: "OR",
+  NOT: "NOT",
   PLUS: "PLUS",
   MINUS: "MINUS",
   STAR: "STAR",
   SLASH: "SLASH",
   EQUALS: "EQUALS",
+  EQEQ: "EQEQ",
+  NEQ: "NEQ",
+  LT: "LT",
+  GT: "GT",
+  LTE: "LTE",
+  GTE: "GTE",
   LPAREN: "LPAREN",
   RPAREN: "RPAREN",
+  LBRACE: "LBRACE",
+  RBRACE: "RBRACE",
   SEMI: "SEMI",
   EOF: "EOF",
 };
@@ -82,6 +99,48 @@ function lex(source) {
       continue;
     }
 
+    // comments: # to end of line
+    if (c === "#") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+
+    // string literals
+    if (c === '"') {
+      const startLine = line;
+      i++; // skip opening quote
+      let str = "";
+      let closed = false;
+      while (i < source.length) {
+        if (source[i] === '"') {
+          i++;
+          closed = true;
+          break;
+        }
+        if (source[i] === "\\" && i + 1 < source.length) {
+          const next = source[i + 1];
+          if (next === "n") str += "\n";
+          else if (next === '"') str += '"';
+          else if (next === "\\") str += "\\";
+          else str += next;
+          i += 2;
+          continue;
+        }
+        if (source[i] === "\n") line++;
+        str += source[i];
+        i++;
+      }
+      if (!closed) {
+        throw new AsasError({
+          line: startLine,
+          message: `This text starting on line ${startLine} is missing a closing quote.`,
+          hint: `Every string needs a matching " at the end — add one where the text should stop.`,
+        });
+      }
+      tokens.push({ type: TokenType.STRING, value: str, line: startLine });
+      continue;
+    }
+
     if (isDigit(c)) {
       let start = i;
       while (i < source.length && (isDigit(source[i]) || source[i] === ".")) i++;
@@ -93,11 +152,26 @@ function lex(source) {
       let start = i;
       while (i < source.length && /[a-zA-Z0-9_]/.test(source[i])) i++;
       const word = source.slice(start, i);
-      if (word === "let") tokens.push({ type: TokenType.LET, line });
-      else if (word === "print") tokens.push({ type: TokenType.PRINT, line });
-      else tokens.push({ type: TokenType.IDENT, value: word, line });
+      switch (word) {
+        case "let": tokens.push({ type: TokenType.LET, line }); break;
+        case "print": tokens.push({ type: TokenType.PRINT, line }); break;
+        case "if": tokens.push({ type: TokenType.IF, line }); break;
+        case "else": tokens.push({ type: TokenType.ELSE, line }); break;
+        case "true": tokens.push({ type: TokenType.TRUE, line }); break;
+        case "false": tokens.push({ type: TokenType.FALSE, line }); break;
+        case "and": tokens.push({ type: TokenType.AND, line }); break;
+        case "or": tokens.push({ type: TokenType.OR, line }); break;
+        case "not": tokens.push({ type: TokenType.NOT, line }); break;
+        default: tokens.push({ type: TokenType.IDENT, value: word, line });
+      }
       continue;
     }
+
+    // two-character operators
+    if (c === "=" && source[i + 1] === "=") { tokens.push({ type: TokenType.EQEQ, line }); i += 2; continue; }
+    if (c === "!" && source[i + 1] === "=") { tokens.push({ type: TokenType.NEQ, line }); i += 2; continue; }
+    if (c === "<" && source[i + 1] === "=") { tokens.push({ type: TokenType.LTE, line }); i += 2; continue; }
+    if (c === ">" && source[i + 1] === "=") { tokens.push({ type: TokenType.GTE, line }); i += 2; continue; }
 
     switch (c) {
       case "+": tokens.push({ type: TokenType.PLUS, line }); i++; break;
@@ -105,14 +179,18 @@ function lex(source) {
       case "*": tokens.push({ type: TokenType.STAR, line }); i++; break;
       case "/": tokens.push({ type: TokenType.SLASH, line }); i++; break;
       case "=": tokens.push({ type: TokenType.EQUALS, line }); i++; break;
+      case "<": tokens.push({ type: TokenType.LT, line }); i++; break;
+      case ">": tokens.push({ type: TokenType.GT, line }); i++; break;
       case "(": tokens.push({ type: TokenType.LPAREN, line }); i++; break;
       case ")": tokens.push({ type: TokenType.RPAREN, line }); i++; break;
+      case "{": tokens.push({ type: TokenType.LBRACE, line }); i++; break;
+      case "}": tokens.push({ type: TokenType.RBRACE, line }); i++; break;
       case ";": tokens.push({ type: TokenType.SEMI, line }); i++; break;
       default:
         throw new AsasError({
           line,
           message: `Asas doesn't recognize the character '${c}'.`,
-          hint: `Only letters, numbers, and + - * / = ( ) ; are valid here — check for a stray symbol or typo.`,
+          hint: `Asas understands letters, numbers, "text in quotes", and + - * / = < > ( ) { } ; # and, or, not.`,
         });
     }
   }
@@ -123,21 +201,45 @@ function lex(source) {
 
 // ---------- PARSER ----------
 // Grammar:
-// program    -> statement*
-// statement  -> letStmt | printStmt
-// letStmt    -> LET IDENT EQUALS expression SEMI?
-// printStmt  -> PRINT LPAREN expression RPAREN SEMI?
-// expression -> term ((PLUS|MINUS) term)*
-// term       -> factor ((STAR|SLASH) factor)*
-// factor     -> NUMBER | IDENT | LPAREN expression RPAREN | MINUS factor
+// program     -> statement*
+// statement   -> letStmt | printStmt | ifStmt | exprStmt
+// block       -> LBRACE statement* RBRACE
+// ifStmt      -> IF LPAREN expression RPAREN block (ELSE (ifStmt | block))?
+// letStmt     -> LET IDENT EQUALS expression SEMI?
+// printStmt   -> PRINT LPAREN expression RPAREN SEMI?
+// expression  -> logicOr
+// logicOr     -> logicAnd (OR logicAnd)*
+// logicAnd    -> equality (AND equality)*
+// equality    -> comparison ((EQEQ|NEQ) comparison)*
+// comparison  -> sum ((LT|GT|LTE|GTE) sum)*
+// sum         -> factor ((PLUS|MINUS) factor)*
+// factor      -> unary ((STAR|SLASH) unary)*
+// unary       -> (MINUS|NOT) unary | primary
+// primary     -> NUMBER | STRING | TRUE | FALSE | IDENT | LPAREN expression RPAREN
 
 function describeToken(type) {
   switch (type) {
     case TokenType.RPAREN: return "a closing ')'";
     case TokenType.LPAREN: return "an opening '('";
+    case TokenType.LBRACE: return "an opening '{'";
+    case TokenType.RBRACE: return "a closing '}'";
     case TokenType.EQUALS: return "'='";
     case TokenType.IDENT: return "a variable name";
     case TokenType.NUMBER: return "a number";
+    case TokenType.STRING: return "text in quotes";
+    case TokenType.TRUE: return "'true'";
+    case TokenType.FALSE: return "'false'";
+    case TokenType.IF: return "'if'";
+    case TokenType.ELSE: return "'else'";
+    case TokenType.AND: return "'and'";
+    case TokenType.OR: return "'or'";
+    case TokenType.NOT: return "'not'";
+    case TokenType.EQEQ: return "'=='";
+    case TokenType.NEQ: return "'!='";
+    case TokenType.LT: return "'<'";
+    case TokenType.GT: return "'>'";
+    case TokenType.LTE: return "'<='";
+    case TokenType.GTE: return "'>='";
     case TokenType.EOF: return "the end of the code";
     case TokenType.PLUS: return "'+'";
     case TokenType.MINUS: return "'-'";
@@ -168,6 +270,15 @@ function parse(tokens) {
           : `Check that every '(' has a matching ')'.`,
       });
     }
+    if (gotToken.type === TokenType.EOF && expectedType === TokenType.RBRACE) {
+      return new AsasError({
+        line: gotToken.line,
+        message: `Reached the end of the code while still looking for a closing '}'.`,
+        hint: context && context.openLine
+          ? `The '{' opened on line ${context.openLine} is never closed — add a '}' to end that block.`
+          : `Check that every '{' has a matching '}'.`,
+      });
+    }
     if (gotToken.type === TokenType.EOF) {
       return new AsasError({
         line: gotToken.line,
@@ -182,11 +293,23 @@ function parse(tokens) {
     });
   }
 
-  function parseFactor() {
+  function parsePrimary() {
     const tok = peek();
     if (tok.type === TokenType.NUMBER) {
       advance();
       return { kind: "Number", value: tok.value, line: tok.line };
+    }
+    if (tok.type === TokenType.STRING) {
+      advance();
+      return { kind: "String", value: tok.value, line: tok.line };
+    }
+    if (tok.type === TokenType.TRUE) {
+      advance();
+      return { kind: "Boolean", value: true, line: tok.line };
+    }
+    if (tok.type === TokenType.FALSE) {
+      advance();
+      return { kind: "Boolean", value: false, line: tok.line };
     }
     if (tok.type === TokenType.IDENT) {
       advance();
@@ -198,38 +321,132 @@ function parse(tokens) {
       expect(TokenType.RPAREN, { openLine: openTok.line });
       return expr;
     }
-    if (tok.type === TokenType.MINUS) {
-      advance();
-      const operand = parseFactor();
-      return { kind: "Unary", op: "-", operand, line: tok.line };
-    }
     throw new AsasError({
       line: tok.line,
-      message: `Expected a value here (a number, a variable, or an expression in parentheses) but found ${describeToken(tok.type)}.`,
+      message: `Expected a value here (a number, text in quotes, true/false, a variable, or parentheses) but found ${describeToken(tok.type)}.`,
       hint: null,
     });
   }
 
-  function parseTerm() {
-    let left = parseFactor();
+  function parseUnary() {
+    const tok = peek();
+    if (tok.type === TokenType.MINUS) {
+      advance();
+      const operand = parseUnary();
+      return { kind: "Unary", op: "-", operand, line: tok.line };
+    }
+    if (tok.type === TokenType.NOT) {
+      advance();
+      const operand = parseUnary();
+      return { kind: "Unary", op: "not", operand, line: tok.line };
+    }
+    return parsePrimary();
+  }
+
+  function parseFactor() {
+    let left = parseUnary();
     while (peek().type === TokenType.STAR || peek().type === TokenType.SLASH) {
       const opTok = advance();
       const op = opTok.type === TokenType.STAR ? "*" : "/";
+      const right = parseUnary();
+      left = { kind: "Binary", op, left, right, line: opTok.line };
+    }
+    return left;
+  }
+
+  function parseSum() {
+    let left = parseFactor();
+    while (peek().type === TokenType.PLUS || peek().type === TokenType.MINUS) {
+      const opTok = advance();
+      const op = opTok.type === TokenType.PLUS ? "+" : "-";
       const right = parseFactor();
       left = { kind: "Binary", op, left, right, line: opTok.line };
     }
     return left;
   }
 
-  function parseExpression() {
-    let left = parseTerm();
-    while (peek().type === TokenType.PLUS || peek().type === TokenType.MINUS) {
+  function parseComparison() {
+    let left = parseSum();
+    while ([TokenType.LT, TokenType.GT, TokenType.LTE, TokenType.GTE].includes(peek().type)) {
       const opTok = advance();
-      const op = opTok.type === TokenType.PLUS ? "+" : "-";
-      const right = parseTerm();
+      const op = { LT: "<", GT: ">", LTE: "<=", GTE: ">=" }[opTok.type];
+      const right = parseSum();
       left = { kind: "Binary", op, left, right, line: opTok.line };
     }
     return left;
+  }
+
+  function parseEquality() {
+    let left = parseComparison();
+    while (peek().type === TokenType.EQEQ || peek().type === TokenType.NEQ) {
+      const opTok = advance();
+      const op = opTok.type === TokenType.EQEQ ? "==" : "!=";
+      const right = parseComparison();
+      left = { kind: "Binary", op, left, right, line: opTok.line };
+    }
+    return left;
+  }
+
+  function parseLogicAnd() {
+    let left = parseEquality();
+    while (peek().type === TokenType.AND) {
+      const opTok = advance();
+      const right = parseEquality();
+      left = { kind: "Logical", op: "and", left, right, line: opTok.line };
+    }
+    return left;
+  }
+
+  function parseLogicOr() {
+    let left = parseLogicAnd();
+    while (peek().type === TokenType.OR) {
+      const opTok = advance();
+      const right = parseLogicAnd();
+      left = { kind: "Logical", op: "or", left, right, line: opTok.line };
+    }
+    return left;
+  }
+
+  function parseExpression() {
+    return parseLogicOr();
+  }
+
+  function parseBlock() {
+    if (peek().type !== TokenType.LBRACE) {
+      throw new AsasError({
+        line: peek().line,
+        message: `Expected a '{' to start a block of code here.`,
+        hint: `Blocks in Asas are wrapped in curly braces, like { ... }.`,
+      });
+    }
+    const openTok = advance();
+    const statements = [];
+    while (peek().type !== TokenType.RBRACE && peek().type !== TokenType.EOF) {
+      statements.push(parseStatement());
+    }
+    expect(TokenType.RBRACE, { openLine: openTok.line });
+    return statements;
+  }
+
+  function parseIf() {
+    const ifTok = advance(); // IF
+    if (peek().type !== TokenType.LPAREN) {
+      throw new AsasError({
+        line: ifTok.line,
+        message: `if needs parentheses around its condition.`,
+        hint: `Try if (condition) { ... }.`,
+      });
+    }
+    const openParen = advance();
+    const cond = parseExpression();
+    expect(TokenType.RPAREN, { openLine: openParen.line });
+    const thenBranch = parseBlock();
+    let elseBranch = null;
+    if (peek().type === TokenType.ELSE) {
+      advance();
+      elseBranch = peek().type === TokenType.IF ? [parseIf()] : parseBlock();
+    }
+    return { kind: "If", cond, thenBranch, elseBranch, line: ifTok.line };
   }
 
   function parseStatement() {
@@ -273,6 +490,10 @@ function parse(tokens) {
       return { kind: "Print", value, line: printTok.line };
     }
 
+    if (peek().type === TokenType.IF) {
+      return parseIf();
+    }
+
     // bare expression statement
     const tok = peek();
     const value = parseExpression();
@@ -288,6 +509,18 @@ function parse(tokens) {
 }
 
 // ---------- EVALUATOR ----------
+function toDisplay(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "boolean") return v ? "true" : "false";
+  return String(v);
+}
+
+function describeType(v) {
+  if (typeof v === "string") return "text";
+  if (typeof v === "boolean") return "a true/false value";
+  return "a number";
+}
+
 function evaluate(program) {
   const env = {};
   const output = [];
@@ -296,6 +529,10 @@ function evaluate(program) {
   function evalExpr(node) {
     switch (node.kind) {
       case "Number":
+        return node.value;
+      case "String":
+        return node.value;
+      case "Boolean":
         return node.value;
       case "Identifier": {
         if (!(node.name in env)) {
@@ -310,16 +547,84 @@ function evaluate(program) {
         }
         return env[node.name];
       }
-      case "Unary":
-        return -evalExpr(node.operand);
+      case "Unary": {
+        const val = evalExpr(node.operand);
+        if (node.op === "-") {
+          if (typeof val !== "number") {
+            throw new AsasError({
+              line: node.line,
+              message: `Can't negate ${describeType(val)} — '-' only works on numbers.`,
+              hint: null,
+            });
+          }
+          return -val;
+        }
+        if (node.op === "not") {
+          if (typeof val !== "boolean") {
+            throw new AsasError({
+              line: node.line,
+              message: `'not' needs a true/false value, but got ${describeType(val)}.`,
+              hint: `Use a comparison like x > 0 to get a true/false value first.`,
+            });
+          }
+          return !val;
+        }
+        throw new AsasError({ line: node.line, message: `Unknown unary operator ${node.op}.` });
+      }
+      case "Logical": {
+        const l = evalExpr(node.left);
+        if (typeof l !== "boolean") {
+          throw new AsasError({
+            line: node.line,
+            message: `'${node.op}' needs true/false values, but the left side is ${describeType(l)}.`,
+            hint: `Use a comparison like x > 0 to get a true/false value first.`,
+          });
+        }
+        if (node.op === "or" && l === true) return true;
+        if (node.op === "and" && l === false) return false;
+        const r = evalExpr(node.right);
+        if (typeof r !== "boolean") {
+          throw new AsasError({
+            line: node.line,
+            message: `'${node.op}' needs true/false values, but the right side is ${describeType(r)}.`,
+            hint: `Use a comparison like x > 0 to get a true/false value first.`,
+          });
+        }
+        return r;
+      }
       case "Binary": {
         const l = evalExpr(node.left);
         const r = evalExpr(node.right);
         switch (node.op) {
-          case "+": return l + r;
-          case "-": return l - r;
-          case "*": return l * r;
+          case "+": {
+            if (typeof l === "number" && typeof r === "number") return l + r;
+            if (typeof l === "string" || typeof r === "string") {
+              if (typeof l !== typeof r) {
+                insights.push({
+                  line: node.line,
+                  message: `Combined ${describeType(l)} and ${describeType(r)} with '+', so the non-text value was converted to text and joined on.`,
+                  hint: `This automatic conversion only happens with '+' when one side is text — other operators require matching types.`,
+                });
+              }
+              return toDisplay(l) + toDisplay(r);
+            }
+            throw new AsasError({
+              line: node.line,
+              message: `'+' needs numbers or text, but got ${describeType(l)} and ${describeType(r)}.`,
+              hint: null,
+            });
+          }
+          case "-":
+          case "*":
           case "/": {
+            if (typeof l !== "number") {
+              throw new AsasError({ line: node.line, message: `'${node.op}' needs a number on the left, but got ${describeType(l)}.`, hint: null });
+            }
+            if (typeof r !== "number") {
+              throw new AsasError({ line: node.line, message: `'${node.op}' needs a number on the right, but got ${describeType(r)}.`, hint: null });
+            }
+            if (node.op === "-") return l - r;
+            if (node.op === "*") return l * r;
             if (r === 0) {
               throw new AsasError({
                 line: node.line,
@@ -337,6 +642,34 @@ function evaluate(program) {
             }
             return result;
           }
+          case "<":
+          case ">":
+          case "<=":
+          case ">=": {
+            if (typeof l !== "number" || typeof r !== "number") {
+              throw new AsasError({
+                line: node.line,
+                message: `'${node.op}' only compares numbers, but got ${describeType(l)} and ${describeType(r)}.`,
+                hint: null,
+              });
+            }
+            if (node.op === "<") return l < r;
+            if (node.op === ">") return l > r;
+            if (node.op === "<=") return l <= r;
+            return l >= r;
+          }
+          case "==":
+          case "!=": {
+            if (typeof l !== typeof r) {
+              insights.push({
+                line: node.line,
+                message: `Compared ${describeType(l)} and ${describeType(r)} with '${node.op}' — different types are never equal in Asas, so this is always ${node.op === "==" ? "false" : "true"}.`,
+                hint: `Make sure both sides are the same type if you meant to compare their values.`,
+              });
+            }
+            const eq = l === r;
+            return node.op === "==" ? eq : !eq;
+          }
           default:
             throw new AsasError({ line: node.line, message: `Unknown operator ${node.op}.` });
         }
@@ -346,22 +679,37 @@ function evaluate(program) {
     }
   }
 
-  for (const stmt of program.statements) {
-    if (stmt.kind === "Let") {
-      if (stmt.name in env) {
-        insights.push({
-          line: stmt.line,
-          message: `'${stmt.name}' was already defined earlier — this line replaced its old value (${env[stmt.name]}).`,
-          hint: `let doesn't error on redeclaration in Asas; it just overwrites silently.`,
-        });
+  function execStatements(statements) {
+    for (const stmt of statements) {
+      if (stmt.kind === "Let") {
+        if (stmt.name in env) {
+          insights.push({
+            line: stmt.line,
+            message: `'${stmt.name}' was already defined earlier — this line replaced its old value (${toDisplay(env[stmt.name])}).`,
+            hint: `let doesn't error on redeclaration in Asas; it just overwrites silently.`,
+          });
+        }
+        env[stmt.name] = evalExpr(stmt.value);
+      } else if (stmt.kind === "Print") {
+        output.push(toDisplay(evalExpr(stmt.value)));
+      } else if (stmt.kind === "ExprStmt") {
+        evalExpr(stmt.value);
+      } else if (stmt.kind === "If") {
+        const cond = evalExpr(stmt.cond);
+        if (typeof cond !== "boolean") {
+          throw new AsasError({
+            line: stmt.line,
+            message: `An 'if' condition must be true or false, but this one is ${describeType(cond)}.`,
+            hint: `Use a comparison like x > 0 or x == 5 to get a true/false value.`,
+          });
+        }
+        if (cond) execStatements(stmt.thenBranch);
+        else if (stmt.elseBranch) execStatements(stmt.elseBranch);
       }
-      env[stmt.name] = evalExpr(stmt.value);
-    } else if (stmt.kind === "Print") {
-      output.push(String(evalExpr(stmt.value)));
-    } else if (stmt.kind === "ExprStmt") {
-      evalExpr(stmt.value);
     }
   }
+
+  execStatements(program.statements);
 
   return { output, insights };
 }
@@ -718,6 +1066,23 @@ export default function AsasIDE() {
               Declares a variable and assigns it a value. Re-declaring with <span style={{ color: "#c9a45c" }}>let</span> overwrites it.
             </div>
 
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Text (strings)</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
+              let name = "Asas"
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              Wrap text in double quotes. Use <span style={{ color: "#c9a45c" }}>+</span> to join text with other text or numbers —
+              e.g. <span style={{ color: "#c9a45c" }}>"x is " + 5</span> becomes <span style={{ color: "#c9a45c" }}>"x is 5"</span>.
+            </div>
+
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>True / false</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
+              true&nbsp;&nbsp;&nbsp;false
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              The two boolean values. Produced by comparisons and used to drive <span style={{ color: "#c9a45c" }}>if</span>.
+            </div>
+
             <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Arithmetic</div>
             <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
               +&nbsp;&nbsp;-&nbsp;&nbsp;*&nbsp;&nbsp;/
@@ -726,6 +1091,44 @@ export default function AsasIDE() {
               Standard precedence — <span style={{ color: "#c9a45c" }}>*</span> and <span style={{ color: "#c9a45c" }}>/</span> run
               before <span style={{ color: "#c9a45c" }}>+</span> and <span style={{ color: "#c9a45c" }}>-</span>. Use parentheses
               <span style={{ color: "#c9a45c" }}> ( ) </span> to control order.
+            </div>
+
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Comparisons</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
+              ==&nbsp;&nbsp;!=&nbsp;&nbsp;&lt;&nbsp;&nbsp;&gt;&nbsp;&nbsp;&lt;=&nbsp;&nbsp;&gt;=
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              Compare two values and produce <span style={{ color: "#c9a45c" }}>true</span> or <span style={{ color: "#c9a45c" }}>false</span>.
+              Ordering (<span style={{ color: "#c9a45c" }}>&lt; &gt; &lt;= &gt;=</span>) only works between numbers.
+            </div>
+
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Logic</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
+              and&nbsp;&nbsp;or&nbsp;&nbsp;not
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              Combine or invert true/false values — e.g. <span style={{ color: "#c9a45c" }}>x &gt; 0 and x &lt; 10</span>.
+            </div>
+
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Conditionals</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4", whiteSpace: "pre" }}>
+{`if (x > 5) {
+  print("big")
+} else {
+  print("small")
+}`}
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              Runs one block or the other depending on the condition. The <span style={{ color: "#c9a45c" }}>else</span> is optional,
+              and can chain into another <span style={{ color: "#c9a45c" }}>if</span> for else-if behavior.
+            </div>
+
+            <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Comments</div>
+            <div style={{ background: "#081712", borderRadius: "6px", padding: "8px 10px", marginBottom: "4px", color: "#a8c9a4" }}>
+              # this is ignored by Asas
+            </div>
+            <div style={{ color: "#8b9a8d", marginBottom: "16px" }}>
+              Anything after <span style={{ color: "#c9a45c" }}>#</span> on a line is ignored.
             </div>
 
             <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Printing output</div>
@@ -738,15 +1141,19 @@ export default function AsasIDE() {
 
             <div style={{ color: "#c9a45c", marginBottom: "6px" }}>Full example</div>
             <div style={{ background: "#081712", borderRadius: "6px", padding: "10px 12px", marginBottom: "16px", color: "#a8c9a4", whiteSpace: "pre" }}>
-{`let x = 5 + 3 * 2
-let y = (x - 1) / 2
-print(x)
-print(y)
-print(x + y)`}
+{`# a small example
+let x = 5 + 3 * 2
+let name = "Asas"
+
+if (x > 10) {
+  print(name + " says x is big: " + x)
+} else {
+  print(name + " says x is small: " + x)
+}`}
             </div>
 
             <div style={{ color: "#6b6250", fontSize: "12px", borderTop: "1px solid #2a3f30", paddingTop: "12px" }}>
-              Not supported yet: conditionals, loops, functions, strings, comments. Coming as Asas grows.
+              Not supported yet: loops, functions, arrays/lists. Coming as Asas grows.
             </div>
 
             <button
@@ -832,7 +1239,7 @@ print(x + y)`}
               className="asas-textarea"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              placeholder={"let x = 5\nprint(x)"}
+              placeholder={'let x = 5\nprint(x)'}
               spellCheck={false}
               style={{
                 flex: 1,
